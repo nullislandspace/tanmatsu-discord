@@ -4,3 +4,4 @@ dependencies:
   nicolaielectronics/tanmatsu-wifi: "^1.1.2"
   robotman2412/pax-gfx: "^2.0.6"
   abobija/esp-discord: "^2.0.1"
+  robotman2412/pax-codecs: "^1.0.1"

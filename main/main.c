@@ -7,7 +7,10 @@
 #include "custom_certificates.h"
 #include "config.h"
 #include "fbdraw.h"
+#include "icons.h"
+#include "intfs.h"
 #include "sdcard.h"
+#include "theme.h"
 #include "ui_core.h"
 #include "driver/gpio.h"
 #include "esp_lcd_panel_ops.h"
@@ -152,34 +155,17 @@ void app_main(void) {
     bsp_led_send();                  // Send data to the coprocessor
     bsp_led_set_mode(false);         // Take control over all LEDs by disabling automatic mode
 
-    // Mount SD card so /sd/discord.json can be read later
-    pax_background(&fb, WHITE);
-    fbdraw_hershey_string(&fb, 8, 32, 1.5f, BLACK, "Mounting SD card...");
-    blit();
-    if (sdcard_init() != ESP_OK) {
-        pax_background(&fb, RED);
-        fbdraw_hershey_string(&fb, 8, 32, 1.5f, WHITE, "SD card missing or unreadable.");
-        fbdraw_hershey_string(&fb, 8, 72, 1.0f, WHITE, "Insert SD card with /discord.json and reboot.");
-        blit();
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    // Mount /int (wear-levelled FATFS on internal flash, partition label "locfd").
+    // Must happen before any /int/* file is opened AND before WiFi init —
+    // it's on internal flash, so it doesn't conflict with SDIO.
+    intfs_init();  // non-fatal
 
-    // Load Discord configuration from SD card
-    pax_background(&fb, WHITE);
-    fbdraw_hershey_string(&fb, 8, 32, 1.5f, BLACK, "Loading /sd/discord.json...");
-    blit();
-    if (config_load("/sd/discord.json", &app_config) != ESP_OK) {
-        pax_background(&fb, RED);
-        fbdraw_hershey_string(&fb, 8, 32, 1.5f, WHITE, "Config missing or invalid.");
-        fbdraw_hershey_string(&fb, 8, 72, 1.0f, WHITE, "Write /discord.json to the SD card.");
-        fbdraw_hershey_string(&fb, 8, 102, 1.0f, WHITE, "See SETUP.md for the format.");
-        blit();
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    // Load F-key icons from /int/icons/*.png
+    icons_load();
 
-    // Start WiFi stack (if your app does not require WiFi or BLE you can remove this section)
-    pax_background(&fb, WHITE);
-    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Connecting to radio...");
+    // Start WiFi stack
+    pax_background(&fb, g_theme->bg);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Connecting to radio...");
     blit();
 
     // Force the radio coprocessor off before bringing it up, in case it was
@@ -191,41 +177,62 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
 
     if (wifi_remote_initialize() == ESP_OK) {
-
-        pax_background(&fb, WHITE);
-        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Starting WiFi stack...");
+        pax_background(&fb, g_theme->bg);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Starting WiFi stack...");
         blit();
-        wifi_connection_init_stack();  // Start the Espressif WiFi stack
+        wifi_connection_init_stack();
 
-        pax_background(&fb, WHITE);
-        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Connecting to WiFi network...");
+        pax_background(&fb, g_theme->bg);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Connecting to WiFi network...");
         blit();
 
         if (wifi_connect_try_all() == ESP_OK) {
-            pax_background(&fb, WHITE);
-            pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Succesfully connected to WiFi network");
+            pax_background(&fb, g_theme->bg);
+            fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->good, "Connected to WiFi network");
             blit();
         } else {
-            pax_background(&fb, RED);
-            pax_draw_text(&fb, WHITE, pax_font_sky_mono, 16, 0, 0, "Failed to connect to WiFi network");
+            pax_background(&fb, g_theme->bg);
+            fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->bad, "Failed to connect to WiFi network");
+            fbdraw_hershey_string(&fb, 8, 72, 1.0f, g_theme->text, "Configure WiFi in the launcher.");
             blit();
         }
     } else {
         bsp_power_set_radio_state(BSP_POWER_RADIO_STATE_OFF);
         ESP_LOGE(TAG, "WiFi radio not responding, WiFi not available");
-        pax_background(&fb, RED);
-        pax_draw_text(&fb, WHITE, pax_font_sky_mono, 16, 0, 0, "WiFi unavailable");
+        pax_background(&fb, g_theme->bg);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->bad, "WiFi unavailable");
         blit();
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Main section of the app
+    // Mount SD card AFTER radio/WiFi init. Bringing up SDMMC-SLOT0 before
+    // ESP-hosted (SDIO-SLOT1) interferes with the radio coprocessor's own
+    // SDIO init — the launcher works around this by deferring SD mount
+    // until after WiFi comes up. Follow the same pattern.
+    pax_background(&fb, g_theme->bg);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Mounting SD card...");
+    blit();
+    if (sdcard_init() != ESP_OK) {
+        pax_background(&fb, g_theme->bg);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->bad, "SD card missing or unreadable.");
+        fbdraw_hershey_string(&fb, 8, 72, 1.0f, g_theme->text, "Insert SD card with /discord.json and reboot.");
+        blit();
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
-    // This example shows how to read from the BSP event queue to read input events
+    // Load Discord configuration from SD card
+    pax_background(&fb, g_theme->bg);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Loading /sd/discord.json...");
+    blit();
+    if (config_load("/sd/discord.json", &app_config) != ESP_OK) {
+        pax_background(&fb, g_theme->bg);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->bad, "Config missing or invalid.");
+        fbdraw_hershey_string(&fb, 8, 72, 1.0f, g_theme->text, "Write /discord.json to the SD card.");
+        fbdraw_hershey_string(&fb, 8, 102, 1.0f, g_theme->text_dim, "See SETUP.md for the format.");
+        blit();
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
-    // If you want to run something at an interval in this same main thread you can replace portMAX_DELAY with an amount
-    // of ticks to wait, for example pdMS_TO_TICKS(1000)
-
-    ui_run(&fb, &app_config, input_event_queue);
+    ui_run(&fb, display_h_res, display_v_res, &app_config, input_event_queue);
 }

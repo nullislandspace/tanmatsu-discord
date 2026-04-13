@@ -8,6 +8,9 @@ idf_component_register(
 	SRCS
 		"main.c"
 		"config.c"
+		"theme.c"
+		"icons.c"
+		"intfs.c"
 		"sdcard.c"
 		"fbdraw.c"
 		"discord_task.c"
@@ -18,6 +21,8 @@ idf_component_register(
 		fatfs
 		sdmmc
 		esp_driver_sdmmc
+		wear_levelling
+		esp_partition
 		vfs
 		nvs_flash
 		bt
@@ -26,6 +31,7 @@ idf_component_register(
 		json
 		esp_http_client
 		esp-discord
+		pax-codecs
 		${extra_requires}
 	INCLUDE_DIRS
 		"."
