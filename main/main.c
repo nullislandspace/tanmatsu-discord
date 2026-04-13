@@ -6,6 +6,7 @@
 #include "bsp/power.h"
 #include "custom_certificates.h"
 #include "config.h"
+#include "discord_task.h"
 #include "fbdraw.h"
 #include "icons.h"
 #include "intfs.h"
@@ -232,6 +233,17 @@ void app_main(void) {
         fbdraw_hershey_string(&fb, 8, 102, 1.0f, g_theme->text_dim, "See SETUP.md for the format.");
         blit();
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // Bring up the Discord gateway. discord_login() is non-blocking —
+    // the websocket task runs independently and the UI task reads from
+    // discord_task_inbound_queue() as messages arrive.
+    pax_background(&fb, g_theme->bg);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, g_theme->highlight, "Logging in to Discord...");
+    blit();
+    esp_err_t dr = discord_task_start(&app_config);
+    if (dr != ESP_OK) {
+        ESP_LOGW(TAG, "discord_task_start failed: %s", esp_err_to_name(dr));
     }
 
     ui_run(&fb, display_h_res, display_v_res, &app_config, input_event_queue);
