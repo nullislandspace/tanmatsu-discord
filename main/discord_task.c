@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "attach_upload.h"
 #include "backfill.h"
 #include "discord.h"
 #include "discord/message.h"
@@ -117,18 +118,49 @@ static void outbound_task(void *arg) {
     while (1) {
         if (xQueueReceive(s_outbound_q, &om, portMAX_DELAY) != pdTRUE) continue;
 
-        discord_message_t  msg    = { .channel_id = om->channel_id, .content = om->text };
-        discord_message_t *result = NULL;
-        esp_err_t          r      = discord_message_send(s_client, &msg, &result);
-        if (r != ESP_OK) {
-            ESP_LOGW(TAG, "send failed: %s", esp_err_to_name(r));
-        } else if (result) {
-            const char *author  = (result->author && result->author->username)
-                                      ? result->author->username : "me";
-            const char *content = result->content ? result->content : om->text;
-            echo_locally(om->channel_id, result->id, author, content);
+        if (om->jpeg_path) {
+            // Attachment path: esp-discord doesn't do multipart, so we POST
+            // directly via esp_http_client. No real local echo (we don't
+            // have a snowflake id), but the gateway will deliver it back
+            // and the bot-author filter will drop it — accept that the
+            // user only sees their upload once it lands via the gateway
+            // (which it won't, since we filter bots). Practical solution:
+            // post a plain text "uploaded <file>" line locally so the user
+            // gets confirmation.
+            esp_err_t r = attach_upload_jpeg(s_cfg->token, om->channel_id,
+                                             om->jpeg_path, om->text);
+            if (r == ESP_OK) {
+                char *fname = strrchr(om->jpeg_path, '/');
+                fname = fname ? fname + 1 : om->jpeg_path;
+                inbound_msg_t *im = calloc(1, sizeof(*im));
+                if (im) {
+                    im->channel_id = safe_strdup(om->channel_id);
+                    im->author     = safe_strdup("me");
+                    char note[160];
+                    snprintf(note, sizeof(note), "[uploaded %s]%s%s", fname,
+                             (om->text && *om->text) ? " " : "",
+                             (om->text && *om->text) ? om->text : "");
+                    im->content    = safe_strdup(note);
+                    if (!im->channel_id || !im->author || !im->content) free_inbound(im);
+                    else if (xQueueSend(s_inbound_q, &im, 0) != pdTRUE) free_inbound(im);
+                }
+            } else {
+                ESP_LOGW(TAG, "attach upload failed: %s", esp_err_to_name(r));
+            }
+        } else {
+            discord_message_t  msg    = { .channel_id = om->channel_id, .content = om->text };
+            discord_message_t *result = NULL;
+            esp_err_t          r      = discord_message_send(s_client, &msg, &result);
+            if (r != ESP_OK) {
+                ESP_LOGW(TAG, "send failed: %s", esp_err_to_name(r));
+            } else if (result) {
+                const char *author  = (result->author && result->author->username)
+                                          ? result->author->username : "me";
+                const char *content = result->content ? result->content : om->text;
+                echo_locally(om->channel_id, result->id, author, content);
+            }
+            if (result) discord_message_free(result);
         }
-        if (result) discord_message_free(result);
 
         free(om->channel_id);
         free(om->text);
@@ -164,7 +196,9 @@ esp_err_t discord_task_start(const config_t *cfg) {
 
     ESP_ERROR_CHECK(discord_register_events(s_client, DISCORD_EVENT_ANY, on_event, NULL));
 
-    if (xTaskCreate(outbound_task, "discord_tx", 4096, NULL, 5, &s_outbound_task) != pdPASS) {
+    // 16 KB: outbound_task can call attach_upload_jpeg which pulls in
+    // esp_http_client + mbedTLS + a 4 KB chunk buffer + msg-send paths.
+    if (xTaskCreate(outbound_task, "discord_tx", 16384, NULL, 5, &s_outbound_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 

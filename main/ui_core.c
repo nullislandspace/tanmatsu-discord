@@ -8,8 +8,10 @@
 #include "discord_task.h"
 #include "esp_log.h"
 #include "fbdraw.h"
+#include "file_browser.h"
 #include "icons.h"
 #include "msgstore.h"
+#include "preview.h"
 #include "shapes/pax_misc.h"
 
 static const char TAG[] = "ui_core";
@@ -349,10 +351,11 @@ static void draw_chat(ui_state_t *s) {
     }
 
     const hint_t hints_browse[] = {
-        { ICON_ESC, "Back" }, { ICON_F1, "Exit" }, { ICON_F2, "Dim" }, { ICON_F3, "Bright" },
+        { ICON_ESC, "Back" }, { ICON_F1, "Exit" }, { ICON_F4, "Image" },
+        { ICON_F2, "Dim" }, { ICON_F3, "Bright" },
     };
     const hint_t hints_compose[] = {
-        { ICON_ESC, "Cancel" }, { ICON_F1, "Exit" },
+        { ICON_ESC, "Cancel" }, { ICON_F1, "Exit" }, { ICON_F4, "Image" },
     };
     if (s->composing) {
         draw_hint_bar(s->fb, W, H, hints_compose, sizeof(hints_compose) / sizeof(hints_compose[0]));
@@ -424,6 +427,113 @@ static void handle_chat_input(ui_state_t *s, const bsp_input_event_t *ev) {
         case BSP_INPUT_NAVIGATION_KEY_DOWN:
             if (s_scroll > 0) s_scroll--;
             break;
+        case BSP_INPUT_NAVIGATION_KEY_F4:
+            // F4 = pick an image to attach. Start in /sd/DCIM if it
+            // exists, otherwise the browser will fall back to /sd.
+            fb_open("/sd/DCIM");
+            s->screen = UI_SCREEN_FILE_BROWSER;
+            break;
+        default:
+            break;
+    }
+}
+
+// --- File browser screen -------------------------------------------------
+
+static void draw_file_browser(ui_state_t *s) {
+    int W = pax_buf_get_width(s->fb);
+    int H = pax_buf_get_height(s->fb);
+    fb_draw(s->fb, W, H);
+    const hint_t hints[] = {
+        { ICON_ESC, "Up/Back" }, { ICON_F1, "Exit" },
+    };
+    draw_hint_bar(s->fb, W, H, hints, sizeof(hints) / sizeof(hints[0]));
+    blit(s);
+}
+
+static void handle_file_browser_input(ui_state_t *s, const bsp_input_event_t *ev) {
+    fb_result_t r = fb_handle_input(ev);
+    if (r == FB_RESULT_PICK) {
+        char *path = fb_picked_path();
+        if (path) {
+            esp_err_t pr = preview_load(path);
+            if (pr != ESP_OK) {
+                ESP_LOGW(TAG, "preview_load failed: %s", esp_err_to_name(pr));
+                return;  // stay in the browser
+            }
+            s->screen = UI_SCREEN_PREVIEW;
+        }
+    } else if (r == FB_RESULT_CANCEL) {
+        s->screen = UI_SCREEN_CHAT;
+    }
+}
+
+// --- Preview screen ------------------------------------------------------
+
+static void draw_preview(ui_state_t *s) {
+    const ui_theme_t *t = g_theme;
+    int W = pax_buf_get_width(s->fb);
+    int H = pax_buf_get_height(s->fb);
+
+    pax_background(s->fb, t->bg);
+    pax_simple_rect(s->fb, t->header_bg, 0, 0, W, 36);
+    const char *p     = preview_path();
+    const char *fname = (p && strrchr(p, '/')) ? strrchr(p, '/') + 1 : (p ? p : "?");
+    fbdraw_hershey_string(s->fb, 8, 10, 0.9f, t->highlight, fname);
+
+    int top = 36;
+    int bot = H - HINT_BAR_H;
+    preview_draw(s->fb, top, bot);
+
+    // Caption hint (uses compose buffer if present)
+    if (s->compose_len > 0) {
+        char line[300];
+        snprintf(line, sizeof(line), "Caption: %s", s->compose_buf);
+        pax_simple_rect(s->fb, t->focus_bg, 0, bot - 28, W, 28);
+        fbdraw_hershey_string(s->fb, 8, bot - 22, 0.8f, t->text, line);
+    }
+
+    const hint_t hints[] = {
+        { ICON_ESC, "Cancel" }, { ICON_F1, "Exit" },
+    };
+    // RETURN doesn't have a dedicated icon in the F-key set; rely on
+    // the on-screen hint text below.
+    draw_hint_bar(s->fb, W, H, hints, sizeof(hints) / sizeof(hints[0]));
+    fbdraw_hershey_string(s->fb, W - 200, H - HINT_BAR_H + 12, 0.8f, t->highlight, "Enter = send");
+    blit(s);
+}
+
+static void handle_preview_input(ui_state_t *s, const bsp_input_event_t *ev) {
+    if (ev->type != INPUT_EVENT_TYPE_NAVIGATION) return;
+    if (!ev->args_navigation.state) return;
+    switch (ev->args_navigation.key) {
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
+            preview_unload();
+            s->screen = UI_SCREEN_FILE_BROWSER;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_RETURN: {
+            const char       *path = preview_path();
+            const channel_t  *c    = &s->cfg->channels[s->active_channel];
+            outbound_msg_t   *om   = calloc(1, sizeof(*om));
+            if (om && path) {
+                om->channel_id = strdup(c->channel_id ? c->channel_id : "");
+                om->jpeg_path  = strdup(path);
+                om->text       = (s->compose_len > 0) ? strdup(s->compose_buf) : NULL;
+                if (!om->channel_id || !om->jpeg_path ||
+                    (s->compose_len > 0 && !om->text)) {
+                    free(om->channel_id); free(om->jpeg_path); free(om->text); free(om);
+                } else if (discord_task_post(om) != ESP_OK) {
+                    ESP_LOGW(TAG, "outbound queue full, dropping upload");
+                    free(om->channel_id); free(om->jpeg_path); free(om->text); free(om);
+                }
+            } else if (om) {
+                free(om);
+            }
+            preview_unload();
+            compose_clear(s);
+            s->screen = UI_SCREEN_CHAT;
+            break;
+        }
         default:
             break;
     }
@@ -481,8 +591,10 @@ static bool handle_global_input(const bsp_input_event_t *ev) {
 
 static void render(ui_state_t *s) {
     switch (s->screen) {
-        case UI_SCREEN_CHANNEL_LIST: draw_channel_list(s); break;
-        case UI_SCREEN_CHAT:         draw_chat(s);         break;
+        case UI_SCREEN_CHANNEL_LIST: draw_channel_list(s);  break;
+        case UI_SCREEN_CHAT:         draw_chat(s);          break;
+        case UI_SCREEN_FILE_BROWSER: draw_file_browser(s);  break;
+        case UI_SCREEN_PREVIEW:      draw_preview(s);       break;
     }
 }
 
@@ -510,6 +622,8 @@ void ui_run(pax_buf_t *fb, size_t panel_w, size_t panel_h,
                 switch (s.screen) {
                     case UI_SCREEN_CHANNEL_LIST: handle_channel_list_input(&s, &ev); break;
                     case UI_SCREEN_CHAT:         handle_chat_input(&s, &ev);         break;
+                    case UI_SCREEN_FILE_BROWSER: handle_file_browser_input(&s, &ev); break;
+                    case UI_SCREEN_PREVIEW:      handle_preview_input(&s, &ev);      break;
                 }
                 need_redraw = true;
             }

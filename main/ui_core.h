@@ -9,6 +9,8 @@
 typedef enum {
     UI_SCREEN_CHANNEL_LIST = 0,
     UI_SCREEN_CHAT,
+    UI_SCREEN_FILE_BROWSER,
+    UI_SCREEN_PREVIEW,
 } ui_screen_t;
 
 // Single entry point: owns the event loop. Never returns.

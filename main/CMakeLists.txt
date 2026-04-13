@@ -13,6 +13,8 @@ idf_component_register(
 		"intfs.c"
 		"msgstore.c"
 		"backfill.c"
+		"file_browser.c"
+		"preview.c"
 		"sdcard.c"
 		"fbdraw.c"
 		"discord_task.c"
@@ -25,6 +27,7 @@ idf_component_register(
 		esp_driver_sdmmc
 		wear_levelling
 		esp_partition
+		esp_driver_jpeg
 		vfs
 		nvs_flash
 		bt
