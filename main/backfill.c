@@ -188,8 +188,15 @@ esp_err_t backfill_init(const config_t *cfg, const char *bot_token) {
     if (!cfg || !bot_token) return ESP_ERR_INVALID_ARG;
     if (s_task) return ESP_OK;
     s_cfg = cfg;
-    s_token_header = strdup(bot_token);  // already includes "Bot "
+    // Build the Authorization header value. Accept the token with or
+    // without a "Bot " prefix (we normalize either way).
+    const char *raw = bot_token;
+    if (strncmp(raw, "Bot ", 4) == 0) raw += 4;
+    while (*raw == ' ') raw++;
+    size_t need = strlen(raw) + 5;  // "Bot " + token + NUL
+    s_token_header = malloc(need);
     if (!s_token_header) return ESP_ERR_NO_MEM;
+    snprintf(s_token_header, need, "Bot %s", raw);
     s_kick_q = xQueueCreate(4, sizeof(int));
     if (!s_kick_q) return ESP_ERR_NO_MEM;
     if (xTaskCreate(task_loop, "discord_bf", 8192, NULL, 4, &s_task) != pdPASS) {

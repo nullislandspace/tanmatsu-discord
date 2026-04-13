@@ -61,6 +61,9 @@ static const chat_msg_t *chat_at(int idx_from_oldest) {
 
 // --- UI state ------------------------------------------------------------
 
+#define COMPOSE_MAX  256
+#define COMPOSE_BAR_H 40
+
 typedef struct {
     pax_buf_t      *fb;
     size_t          panel_w;
@@ -69,11 +72,16 @@ typedef struct {
     ui_screen_t     screen;
     int             channel_sel;
     int             active_channel;
+    bool            composing;
+    char            compose_buf[COMPOSE_MAX];
+    int             compose_len;
 } ui_state_t;
 
 static void blit(ui_state_t *s) {
     bsp_display_blit(0, 0, s->panel_w, s->panel_h, pax_buf_get_pixels(s->fb));
 }
+
+static void compose_clear(ui_state_t *s);
 
 // --- Hint bar ------------------------------------------------------------
 
@@ -180,6 +188,7 @@ static void handle_channel_list_input(ui_state_t *s, const bsp_input_event_t *ev
             if (n > 0) {
                 s->active_channel = s->channel_sel;
                 s->screen         = UI_SCREEN_CHAT;
+                compose_clear(s);
                 chat_clear();
                 const channel_t *c = &s->cfg->channels[s->active_channel];
                 // Hydrate the ring from disk so the chat view shows history
@@ -268,8 +277,9 @@ static void draw_chat(ui_state_t *s) {
     pax_simple_rect(s->fb, t->header_bg, 0, 0, W, 60);
     fbdraw_hershey_string(s->fb, 8, 20, 1.2f, t->highlight, c->name ? c->name : "(unnamed)");
 
-    int chat_top = 70;
-    int chat_bot = H - HINT_BAR_H - 4;
+    int chat_top   = 70;
+    int compose_h  = s->composing ? COMPOSE_BAR_H : 0;
+    int chat_bot   = H - HINT_BAR_H - compose_h - 4;
     int max_line_w = W - 16;
 
     // Walk messages newest -> oldest, stacking wrapped lines upward.
@@ -322,19 +332,91 @@ static void draw_chat(ui_state_t *s) {
                               "No messages yet. Messages will appear here as they arrive.");
     }
 
-    const hint_t hints[] = {
+    // Compose bar (only visible while typing).
+    if (s->composing) {
+        int by = H - HINT_BAR_H - COMPOSE_BAR_H;
+        pax_simple_rect(s->fb, t->focus_bg, 0, by, W, COMPOSE_BAR_H);
+        fbdraw_hershey_string(s->fb, 6, by + 8, 0.7f, t->text_dim, ">");
+        // Render the buffer; if it overflows the bar, show a sliding tail.
+        const char *show     = s->compose_buf;
+        int         tw       = fbdraw_hershey_string_width(0.9f, show);
+        int         max_w    = W - 30;
+        while (tw > max_w && *show) {
+            show++;
+            tw = fbdraw_hershey_string_width(0.9f, show);
+        }
+        fbdraw_hershey_string(s->fb, 22, by + 8, 0.9f, t->highlight, show);
+    }
+
+    const hint_t hints_browse[] = {
         { ICON_ESC, "Back" }, { ICON_F1, "Exit" }, { ICON_F2, "Dim" }, { ICON_F3, "Bright" },
     };
-    draw_hint_bar(s->fb, W, H, hints, sizeof(hints) / sizeof(hints[0]));
+    const hint_t hints_compose[] = {
+        { ICON_ESC, "Cancel" }, { ICON_F1, "Exit" },
+    };
+    if (s->composing) {
+        draw_hint_bar(s->fb, W, H, hints_compose, sizeof(hints_compose) / sizeof(hints_compose[0]));
+    } else {
+        draw_hint_bar(s->fb, W, H, hints_browse, sizeof(hints_browse) / sizeof(hints_browse[0]));
+    }
     blit(s);
 }
 
+static void compose_clear(ui_state_t *s) {
+    s->composing   = false;
+    s->compose_len = 0;
+    s->compose_buf[0] = '\0';
+}
+
+static void compose_submit(ui_state_t *s) {
+    if (s->compose_len == 0) { compose_clear(s); return; }
+    const channel_t *c = &s->cfg->channels[s->active_channel];
+
+    outbound_msg_t *om = calloc(1, sizeof(*om));
+    if (om) {
+        om->channel_id = strdup(c->channel_id ? c->channel_id : "");
+        om->text       = strdup(s->compose_buf);
+        if (!om->channel_id || !om->text) {
+            free(om->channel_id); free(om->text); free(om);
+        } else if (discord_task_post(om) != ESP_OK) {
+            ESP_LOGW(TAG, "outbound queue full, dropping send");
+            free(om->channel_id); free(om->text); free(om);
+        }
+    }
+    compose_clear(s);
+}
+
 static void handle_chat_input(ui_state_t *s, const bsp_input_event_t *ev) {
+    // Keyboard events: drive the compose buffer.
+    if (ev->type == INPUT_EVENT_TYPE_KEYBOARD) {
+        char ch = ev->args_keyboard.ascii;
+        if (ch == '\b') {
+            if (s->compose_len > 0) {
+                s->compose_buf[--s->compose_len] = '\0';
+                if (s->compose_len == 0) s->composing = false;
+            }
+            return;
+        }
+        if (ch == '\n' || ch == '\r' || ch == '\t') return;  // handled elsewhere or ignored
+        if (ch < 0x20 || ch == 0x7f) return;                  // skip non-printable
+        if (s->compose_len < COMPOSE_MAX - 1) {
+            s->composing                          = true;
+            s->compose_buf[s->compose_len++]      = ch;
+            s->compose_buf[s->compose_len]        = '\0';
+        }
+        return;
+    }
+
     if (ev->type != INPUT_EVENT_TYPE_NAVIGATION) return;
     if (!ev->args_navigation.state) return;
+
     switch (ev->args_navigation.key) {
+        case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            if (s->composing) compose_submit(s);
+            break;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
-            s->screen = UI_SCREEN_CHANNEL_LIST;
+            if (s->composing) compose_clear(s);
+            else              s->screen = UI_SCREEN_CHANNEL_LIST;
             break;
         case BSP_INPUT_NAVIGATION_KEY_UP:
             s_scroll++;

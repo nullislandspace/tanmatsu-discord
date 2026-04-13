@@ -93,20 +93,43 @@ static void on_event(void *arg, esp_event_base_t base, int32_t event_id, void *e
     }
 }
 
+// Local-echo helpers: after a successful send we want our own message to
+// appear in the chat ring + JSONL right away. The gateway also delivers
+// it back as MESSAGE_RECEIVED, but we filter author->bot=true there to
+// avoid bot spam — so we have to inject the echo ourselves.
+static void echo_locally(const char *channel_id, const char *msg_id,
+                         const char *author, const char *content) {
+    if (!channel_id || !msg_id) return;
+    if (msgstore_append(channel_id, msg_id, author, content) != ESP_OK) return;
+
+    inbound_msg_t *im = calloc(1, sizeof(*im));
+    if (!im) return;
+    im->channel_id = safe_strdup(channel_id);
+    im->author     = safe_strdup(author ? author : "me");
+    im->content    = safe_strdup(content ? content : "");
+    if (!im->channel_id || !im->author || !im->content) { free_inbound(im); return; }
+    if (xQueueSend(s_inbound_q, &im, 0) != pdTRUE) free_inbound(im);
+}
+
 static void outbound_task(void *arg) {
     (void)arg;
     outbound_msg_t *om;
     while (1) {
         if (xQueueReceive(s_outbound_q, &om, portMAX_DELAY) != pdTRUE) continue;
 
-        discord_message_t msg = {
-            .channel_id = om->channel_id,
-            .content    = om->text,
-        };
-        esp_err_t r = discord_message_send(s_client, &msg, NULL);
+        discord_message_t  msg    = { .channel_id = om->channel_id, .content = om->text };
+        discord_message_t *result = NULL;
+        esp_err_t          r      = discord_message_send(s_client, &msg, &result);
         if (r != ESP_OK) {
             ESP_LOGW(TAG, "send failed: %s", esp_err_to_name(r));
+        } else if (result) {
+            const char *author  = (result->author && result->author->username)
+                                      ? result->author->username : "me";
+            const char *content = result->content ? result->content : om->text;
+            echo_locally(om->channel_id, result->id, author, content);
         }
+        if (result) discord_message_free(result);
+
         free(om->channel_id);
         free(om->text);
         free(om->jpeg_path);
@@ -123,8 +146,17 @@ esp_err_t discord_task_start(const config_t *cfg) {
     s_outbound_q = xQueueCreate(OUTBOUND_Q_LEN, sizeof(outbound_msg_t *));
     if (!s_inbound_q || !s_outbound_q) return ESP_ERR_NO_MEM;
 
+    // esp-discord prepends "Bot " itself when building the Authorization
+    // header (see managed_components/.../src/discord/private/_api.c). If the
+    // user wrote "Bot ..." in discord.json we must strip it, otherwise the
+    // REST API sees "Bot Bot <token>" and 401s. The gateway IDENTIFY path
+    // ignores the prefix, which is why login appears to work either way.
+    const char *raw = cfg->token;
+    if (strncmp(raw, "Bot ", 4) == 0) raw += 4;
+    while (*raw == ' ') raw++;
+
     discord_config_t dcfg = {
-        .token   = cfg->token,
+        .token   = (char *)raw,
         .intents = DISCORD_INTENT_GUILD_MESSAGES | DISCORD_INTENT_MESSAGE_CONTENT,
     };
     s_client = discord_create(&dcfg);
