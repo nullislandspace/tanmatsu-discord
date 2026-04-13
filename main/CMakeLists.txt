@@ -11,6 +11,8 @@ idf_component_register(
 		"theme.c"
 		"icons.c"
 		"intfs.c"
+		"msgstore.c"
+		"backfill.c"
 		"sdcard.c"
 		"fbdraw.c"
 		"discord_task.c"

@@ -5,11 +5,13 @@
 #include "bsp/led.h"
 #include "bsp/power.h"
 #include "custom_certificates.h"
+#include "backfill.h"
 #include "config.h"
 #include "discord_task.h"
 #include "fbdraw.h"
 #include "icons.h"
 #include "intfs.h"
+#include "msgstore.h"
 #include "sdcard.h"
 #include "theme.h"
 #include "ui_core.h"
@@ -234,6 +236,12 @@ void app_main(void) {
         blit();
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+    // Set up persistent /sd/discord/<channel>.jsonl history and the REST
+    // backfill task. Both must be ready before discord_task_start() so the
+    // first DISCORD_EVENT_CONNECTED can fire backfill_kick() safely.
+    msgstore_init();
+    backfill_init(&app_config, app_config.token);
 
     // Bring up the Discord gateway. discord_login() is non-blocking —
     // the websocket task runs independently and the UI task reads from

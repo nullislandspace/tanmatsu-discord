@@ -3,11 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "backfill.h"
 #include "discord.h"
 #include "discord/message.h"
 #include "discord/user.h"
 #include "esp_log.h"
 #include "freertos/task.h"
+#include "msgstore.h"
 
 static const char TAG[] = "discord_task";
 
@@ -49,6 +51,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t event_id, void *e
     switch ((discord_event_t)event_id) {
         case DISCORD_EVENT_CONNECTED:
             ESP_LOGI(TAG, "gateway connected");
+            backfill_kick();
             break;
         case DISCORD_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "gateway disconnected");
@@ -62,11 +65,19 @@ static void on_event(void *arg, esp_event_base_t base, int32_t event_id, void *e
             if (!channel_is_configured(msg->channel_id)) break;
             if (msg->author && msg->author->bot) break;  // skip other bots incl. self
 
+            const char *author  = msg->author ? msg->author->username : "?";
+            const char *content = msg->content ? msg->content : "";
+            // Persist first; msgstore_append dedupes by snowflake id, so a
+            // gateway message that overlaps with an in-flight backfill is
+            // safely dropped here.
+            esp_err_t pr = msgstore_append(msg->channel_id, msg->id, author, content);
+            if (pr == ESP_ERR_INVALID_STATE) break;  // duplicate, don't notify UI either
+
             inbound_msg_t *im = calloc(1, sizeof(*im));
             if (!im) break;
             im->channel_id = safe_strdup(msg->channel_id);
-            im->author     = safe_strdup(msg->author ? msg->author->username : "?");
-            im->content    = safe_strdup(msg->content ? msg->content : "");
+            im->author     = safe_strdup(author);
+            im->content    = safe_strdup(content);
             if (!im->channel_id || !im->author || !im->content) {
                 free_inbound(im);
                 break;
