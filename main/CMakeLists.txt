@@ -7,13 +7,25 @@ endif()
 idf_component_register(
 	SRCS
 		"main.c"
+		"config.c"
+		"sdcard.c"
+		"fbdraw.c"
+		"discord_task.c"
+		"ui_core.c"
+		"attach_upload.c"
 	PRIV_REQUIRES
 		esp_lcd
 		fatfs
+		sdmmc
+		esp_driver_sdmmc
+		vfs
 		nvs_flash
 		bt
 		badge-bsp
 		tanmatsu-wifi
+		json
+		esp_http_client
+		esp-discord
 		${extra_requires}
 	INCLUDE_DIRS
 		"."

@@ -58,33 +58,34 @@ BADGELINK_CONN := $(if $(findstring :,$(BADGELINKPORT)),--tcp $(BADGELINKPORT),-
 .PHONY: badgelink
 badgelink:
 	rm -rf badgelink
-	git clone https://github.com/badgeteam/esp32-component-badgelink.git badgelink
+	#git clone https://github.com/badgeteam/esp32-component-badgelink.git badgelink
+	git clone https:///github.com/nullislandspace/esp32-component-badgelink.git badgelink
 	cd badgelink/tools; ./install.sh
 
 APP_SLUG ?= com.example.template
 APP_INSTALL_BASE_PATH ?= /int/apps/
 APP_INSTALL_PATH = $(APP_INSTALL_BASE_PATH)$(APP_SLUG)
+APP_REPO_PATH ?= ../tanmatsu-app-repository/$(APP_SLUG_NAME)
 
 .PHONY: install
 install: build
-	@echo "=== Installing application ==="
-	@echo "Creating directory $(APP_INSTALL_PATH)..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH) || true
-	@echo "Uploading metadata.json..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/metadata.json ../../metadata/metadata.json
-	@echo "Uploading icon16.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon16.png ../../metadata/icon16.png
-	@echo "Uploading icon32.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon32.png ../../metadata/icon32.png
-	@echo "Uploading icon64.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon64.png ../../metadata/icon64.png
-	@echo "Uploading application.bin..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/application.bin ../../$(BUILD)/application.bin
-	@echo "=== Installation complete ==="
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) appfs upload application "discord" 0 ../../$(BUILD)/application.bin
 
 .PHONY: run
 run:
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) start $(APP_SLUG)
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) start application
+
+.PHONY: apprepo
+apprepo: build
+	@echo "=== Updating app repository ==="
+	mkdir -p $(APP_REPO_PATH)
+	cp metadata/metadata.json $(APP_REPO_PATH)/metadata.json
+	cp metadata/icon16.png $(APP_REPO_PATH)/icon16.png
+	cp metadata/icon32.png $(APP_REPO_PATH)/icon32.png
+	cp metadata/icon64.png $(APP_REPO_PATH)/icon64.png
+	cp metadata/tanmatype.jpg $(APP_REPO_PATH)/tanmatype.jpg
+	cp $(BUILD)/application.bin $(APP_REPO_PATH)/application.bin
+	@echo "=== App repository updated at $(APP_REPO_PATH) ==="
 
 # Preparation
 
@@ -131,6 +132,7 @@ menuconfig:
 clean:
 	rm -rf $(BUILD)
 	rm -f .submodules_update_done
+	rm -f sdkconfig_tanmatsu
 
 .PHONY: fullclean
 fullclean: clean
@@ -157,8 +159,17 @@ checkbuildenv:
 
 # Building
 
+# esp-discord ships certgen.sh without the executable bit in the tarball;
+# its CMakeLists invokes it directly (not via bash), so we restore +x here.
+# Idempotent and auto-heals after the component manager re-extracts.
+.PHONY: fix-component-perms
+fix-component-perms:
+	@if [ -f managed_components/abobija__esp-discord/certgen.sh ]; then \
+		chmod +x managed_components/abobija__esp-discord/certgen.sh; \
+	fi
+
 .PHONY: build
-build: icons checkbuildenv submodules
+build: icons checkbuildenv submodules fix-component-perms
 	source "$(IDF_PATH)/export.sh" >/dev/null && idf.py $(IDF_PARAMS)
 
 # Hardware

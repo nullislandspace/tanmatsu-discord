@@ -5,6 +5,10 @@
 #include "bsp/led.h"
 #include "bsp/power.h"
 #include "custom_certificates.h"
+#include "config.h"
+#include "fbdraw.h"
+#include "sdcard.h"
+#include "ui_core.h"
 #include "driver/gpio.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_types.h"
@@ -28,6 +32,7 @@ static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMA
 static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
 static pax_buf_t                    fb                   = {0};
 static QueueHandle_t                input_event_queue    = NULL;
+static config_t                     app_config           = {0};
 
 #if defined(CONFIG_BSP_TARGET_KAMI)
 // Temporary addition for supporting epaper devices (irrelevant for Tanmatsu)
@@ -147,10 +152,43 @@ void app_main(void) {
     bsp_led_send();                  // Send data to the coprocessor
     bsp_led_set_mode(false);         // Take control over all LEDs by disabling automatic mode
 
+    // Mount SD card so /sd/discord.json can be read later
+    pax_background(&fb, WHITE);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, BLACK, "Mounting SD card...");
+    blit();
+    if (sdcard_init() != ESP_OK) {
+        pax_background(&fb, RED);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, WHITE, "SD card missing or unreadable.");
+        fbdraw_hershey_string(&fb, 8, 72, 1.0f, WHITE, "Insert SD card with /discord.json and reboot.");
+        blit();
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // Load Discord configuration from SD card
+    pax_background(&fb, WHITE);
+    fbdraw_hershey_string(&fb, 8, 32, 1.5f, BLACK, "Loading /sd/discord.json...");
+    blit();
+    if (config_load("/sd/discord.json", &app_config) != ESP_OK) {
+        pax_background(&fb, RED);
+        fbdraw_hershey_string(&fb, 8, 32, 1.5f, WHITE, "Config missing or invalid.");
+        fbdraw_hershey_string(&fb, 8, 72, 1.0f, WHITE, "Write /discord.json to the SD card.");
+        fbdraw_hershey_string(&fb, 8, 102, 1.0f, WHITE, "See SETUP.md for the format.");
+        blit();
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     // Start WiFi stack (if your app does not require WiFi or BLE you can remove this section)
     pax_background(&fb, WHITE);
     pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Connecting to radio...");
     blit();
+
+    // Force the radio coprocessor off before bringing it up, in case it was
+    // left in APPLICATION mode by a previously running app with a transfer
+    // still in flight. Without this clean power-cycle the radio can come up
+    // in an inconsistent state and cause crashes shortly after launch.
+    // (Same pattern as tanmatsu-launcher/main/main.c:473.)
+    bsp_power_set_radio_state(BSP_POWER_RADIO_STATE_OFF);
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     if (wifi_remote_initialize() == ESP_OK) {
 
@@ -189,85 +227,5 @@ void app_main(void) {
     // If you want to run something at an interval in this same main thread you can replace portMAX_DELAY with an amount
     // of ticks to wait, for example pdMS_TO_TICKS(1000)
 
-    pax_background(&fb, WHITE);
-    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Welcome! Press any key to trigger an event.");
-    blit();
-
-    while (1) {
-        bsp_input_event_t event;
-        if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-            switch (event.type) {
-                case INPUT_EVENT_TYPE_KEYBOARD: {
-                    if (event.args_keyboard.ascii != '\b' ||
-                        event.args_keyboard.ascii != '\t') {  // Ignore backspace & tab keyboard events
-                        ESP_LOGI(TAG, "Keyboard event %c (%02x) %s", event.args_keyboard.ascii,
-                                 (uint8_t)event.args_keyboard.ascii, event.args_keyboard.utf8);
-                        pax_simple_rect(&fb, WHITE, 0, 0, pax_buf_get_width(&fb), 72);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Keyboard event");
-                        char text[64];
-                        snprintf(text, sizeof(text), "ASCII:     %c (0x%02x)", event.args_keyboard.ascii,
-                                 (uint8_t)event.args_keyboard.ascii);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 18, text);
-                        snprintf(text, sizeof(text), "UTF-8:     %s", event.args_keyboard.utf8);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 36, text);
-                        snprintf(text, sizeof(text), "Modifiers: 0x%0" PRIX32, event.args_keyboard.modifiers);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 54, text);
-                        blit();
-                    }
-                    break;
-                }
-                case INPUT_EVENT_TYPE_NAVIGATION: {
-                    ESP_LOGI(TAG, "Navigation event %0" PRIX32 ": %s", (uint32_t)event.args_navigation.key,
-                             event.args_navigation.state ? "pressed" : "released");
-
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
-                        bsp_device_restart_to_launcher();
-                    }
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F2) {
-                        bsp_input_set_backlight_brightness(0);
-                    }
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F3) {
-                        bsp_input_set_backlight_brightness(100);
-                    }
-
-                    pax_simple_rect(&fb, WHITE, 0, 100, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 0, "Navigation event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Key:       0x%0" PRIX32, (uint32_t)event.args_navigation.key);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 18, text);
-                    snprintf(text, sizeof(text), "State:     %s", event.args_navigation.state ? "pressed" : "released");
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 36, text);
-                    snprintf(text, sizeof(text), "Modifiers: 0x%0" PRIX32, event.args_navigation.modifiers);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 54, text);
-                    blit();
-                    break;
-                }
-                case INPUT_EVENT_TYPE_ACTION: {
-                    ESP_LOGI(TAG, "Action event 0x%0" PRIX32 ": %s", (uint32_t)event.args_action.type,
-                             event.args_action.state ? "yes" : "no");
-                    pax_simple_rect(&fb, WHITE, 0, 200 + 0, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 0, "Action event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Type:      0x%0" PRIX32, (uint32_t)event.args_action.type);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 36, text);
-                    snprintf(text, sizeof(text), "State:     %s", event.args_action.state ? "yes" : "no");
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 54, text);
-                    blit();
-                    break;
-                }
-                case INPUT_EVENT_TYPE_SCANCODE: {
-                    ESP_LOGI(TAG, "Scancode event 0x%0" PRIX32, (uint32_t)event.args_scancode.scancode);
-                    pax_simple_rect(&fb, WHITE, 0, 300 + 0, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 300 + 0, "Scancode event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Scancode:  0x%0" PRIX32, (uint32_t)event.args_scancode.scancode);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 300 + 36, text);
-                    blit();
-                    break;
-                }
-                default:
-                    break;
-            }
-        }
-    }
+    ui_run(&fb, &app_config, input_event_queue);
 }

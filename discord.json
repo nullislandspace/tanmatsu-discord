@@ -1,0 +1,12 @@
+{                                                                                                                                                                                                                                                                            
+    "token": "Bot DUMMY_TOKEN_FOR_TESTING",                                        
+    "default_channel": "111111111111111111",                                                                                                                                                                                                                                   
+    "channels": [                                                                  
+      { "guild_id": "222222222222222222",                                                                                                                                                                                                                                      
+        "channel_id": "333333333333333333",                     
+        "name": "test-general" },                                                                                                                                                                                                                                              
+      { "guild_id": "222222222222222222",                                          
+        "channel_id": "444444444444444444",                                                                                                                                                                                                                                    
+        "name": "test-random" }                                                    
+    ]                                                                                                                                                                                                                                                                          
+  }
